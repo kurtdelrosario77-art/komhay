@@ -9,13 +9,18 @@
   body{font-family:Arial,sans-serif;background:#0f172a;color:#fff;margin:0;padding:16px;text-align:center}
   h1{font-size:20px;margin:8px 0 16px}
   .box{max-width:480px;margin:0 auto;background:#1e293b;border-radius:12px;padding:16px}
-  video{width:100%;border-radius:10px;background:#000;transform:scaleX(-1)}
+  video{width:100%;border-radius:10px;background:#000;transform:scaleX(-1);display:block}
+  .cam{position:relative}
+  .cam canvas{position:absolute;top:0;left:0;width:100%;height:100%;transform:scaleX(-1)}
   input,select,button{width:100%;padding:12px;margin:6px 0;border-radius:8px;border:none;font-size:16px;box-sizing:border-box}
   button{background:#3b82f6;color:#fff;cursor:pointer}
   button.red{background:#ef4444}
   #result{margin-top:12px;padding:14px;border-radius:10px;font-size:20px;font-weight:bold;background:#334155}
   #result.ok{background:#16a34a}
   #result.bad{background:#dc2626}
+  #regmsg{margin-top:10px;font-size:13px;color:#94a3b8}
+  #regmsg.recording{font-size:16px;color:#22c55e;font-weight:bold}
+  #regmsg.done{padding:14px;border-radius:10px;font-size:20px;font-weight:bold;background:#16a34a;color:#fff}
   table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
   td,th{border-bottom:1px solid #334155;padding:6px;text-align:left}
   .small{font-size:13px;color:#94a3b8}
@@ -36,14 +41,17 @@
 
   <!-- register page -->
   <div id="registerpage" class="hidden">
-    <video id="regvideo" autoplay muted playsinline></video>
+    <div class="cam">
+      <video id="regvideo" autoplay muted playsinline></video>
+      <canvas id="regcanvas"></canvas>
+    </div>
     <input id="regname" placeholder="full name">
     <select id="regrole">
       <option>student</option>
       <option>teacher</option>
     </select>
     <button id="regbtn">register my face</button>
-    <div id="regmsg" class="small">loading...</div>
+    <div id="regmsg">loading...</div>
   </div>
 
   <!-- admin page -->
@@ -54,6 +62,7 @@
     <h3>registered</h3>
     <table id="peopletable"></table>
     <h3>time in / time out</h3>
+    <p class="small">only the last 24 hours are kept</p>
     <table id="logtable"></table>
     <button id="clearlogs" class="red">clear all logs</button>
   </div>
@@ -63,17 +72,30 @@
 var adminpin = '1234';
 var modelurl = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
 var page = new URLSearchParams(location.search).get('page') || 'gate';
+var dayms = 24 * 60 * 60 * 1000;
 
-/* ---------- storage (swap these 4 functions for a database later) ---------- */
+/* ---------- storage (swap these functions for a database later) ---------- */
 function getpeople(){ return JSON.parse(localStorage.getItem('people') || '[]'); }
 function savepeople(list){ localStorage.setItem('people', JSON.stringify(list)); }
 function getlogs(){ return JSON.parse(localStorage.getItem('logs') || '[]'); }
 function savelogs(list){ localStorage.setItem('logs', JSON.stringify(list)); }
 
+// removes logs older than 24 hours and returns the ones left
+function purgelogs(){
+  var limit = Date.now() - dayms;
+  var kept = getlogs().filter(function(l){
+    var t = l.stamp || new Date(l.date + ' ' + l.timein).getTime();
+    return t && t > limit;
+  });
+  savelogs(kept);
+  return kept;
+}
+
 /* ---------- helpers ---------- */
 function el(id){ return document.getElementById(id); }
 function today(){ return new Date().toLocaleDateString(); }
 function nowtime(){ return new Date().toLocaleTimeString(); }
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 
 async function loadmodels(){
   await faceapi.nets.tinyFaceDetector.loadFromUri(modelurl);
@@ -92,6 +114,21 @@ function detectface(video){
     .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
     .withFaceLandmarks()
     .withFaceDescriptor();
+}
+
+// draws a green line around the face (or clears it when box is null)
+function drawbox(box){
+  var video = el('regvideo');
+  var canvas = el('regcanvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  var c = canvas.getContext('2d');
+  c.clearRect(0, 0, canvas.width, canvas.height);
+  if(box){
+    c.strokeStyle = '#22c55e';
+    c.lineWidth = 5;
+    c.strokeRect(box.x, box.y, box.width, box.height);
+  }
 }
 
 /* ---------- gate page ---------- */
@@ -140,16 +177,16 @@ async function startgate(){
     lastname = person.id;
     lasttime = Date.now();
 
-    var logs = getlogs();
+    var logs = purgelogs();
     var record = logs.find(function(l){ return l.id === person.id && l.date === today(); });
 
     if(!record){
-      logs.push({ id: person.id, name: person.name, role: person.role, date: today(), timein: nowtime(), timeout: '' });
+      logs.push({ id: person.id, name: person.name, role: person.role, date: today(), timein: nowtime(), timeout: '', stamp: Date.now() });
       result.className = 'ok';
       result.innerHTML = person.name + ' (' + person.role + ')<br>time in: ' + nowtime();
     } else if(!record.timeout){
       // must wait at least 1 minute after time in
-      var inms = new Date(record.date + ' ' + record.timein).getTime();
+      var inms = record.stamp || new Date(record.date + ' ' + record.timein).getTime();
       if(Date.now() - inms < 60000){
         result.className = 'ok';
         result.innerHTML = person.name + '<br>already timed in at ' + record.timein;
@@ -171,25 +208,38 @@ async function startregister(){
   el('registerpage').classList.remove('hidden');
   await loadmodels();
   await startcamera(el('regvideo'));
+  el('regmsg').className = '';
   el('regmsg').textContent = 'type your name, look at the camera, then tap register';
 
   el('regbtn').onclick = async function(){
     var name = el('regname').value.trim();
-    if(!name){ el('regmsg').textContent = 'please type your name'; return; }
+    if(!name){ el('regmsg').className = ''; el('regmsg').textContent = 'please type your name'; return; }
 
     el('regbtn').disabled = true;
-    var samples = [];
-    el('regmsg').textContent = 'hold still... scanning your face';
+    el('regmsg').className = 'recording';
+    el('regmsg').textContent = 'recording your face... hold still';
 
-    var tries = 0;
-    while(samples.length < 3 && tries < 20){
-      tries++;
+    var samples = [];
+    var start = Date.now();
+    var lastsample = 0;
+
+    while(samples.length < 3 && Date.now() - start < 15000){
       var found = await detectface(el('regvideo'));
-      if(found){ samples.push(Array.from(found.descriptor)); }
-      await new Promise(function(r){ setTimeout(r, 400); });
+      if(found){
+        drawbox(found.detection.box);
+        if(Date.now() - lastsample > 400){
+          samples.push(Array.from(found.descriptor));
+          lastsample = Date.now();
+        }
+      } else {
+        drawbox(null);
+      }
+      await sleep(100);
     }
 
     if(samples.length < 3){
+      drawbox(null);
+      el('regmsg').className = '';
       el('regmsg').textContent = 'face not clear, please try again (good light, face the camera)';
       el('regbtn').disabled = false;
       return;
@@ -204,9 +254,13 @@ async function startregister(){
     });
     savepeople(people);
 
-    el('regmsg').textContent = 'done! ' + name + ' is now registered.';
+    el('regmsg').className = 'done';
+    el('regmsg').textContent = 'Face Registered';
     el('regname').value = '';
     el('regbtn').disabled = false;
+
+    // keep the green line for a moment, then clear it
+    setTimeout(function(){ drawbox(null); }, 2500);
   };
 }
 
@@ -237,7 +291,7 @@ function showadmin(){
   el('peopletable').innerHTML = ptable;
 
   var ltable = '<tr><th>name</th><th>date</th><th>in</th><th>out</th></tr>';
-  getlogs().slice().reverse().forEach(function(l){
+  purgelogs().slice().reverse().forEach(function(l){
     ltable += '<tr><td>' + l.name + '</td><td>' + l.date + '</td><td>' + l.timein + '</td><td>' + (l.timeout || '-') + '</td></tr>';
   });
   el('logtable').innerHTML = ltable;
