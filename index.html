@@ -1,0 +1,258 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>komhay gate security</title>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<style>
+  body{font-family:Arial,sans-serif;background:#0f172a;color:#fff;margin:0;padding:16px;text-align:center}
+  h1{font-size:20px;margin:8px 0 16px}
+  .box{max-width:480px;margin:0 auto;background:#1e293b;border-radius:12px;padding:16px}
+  video{width:100%;border-radius:10px;background:#000;transform:scaleX(-1)}
+  input,select,button{width:100%;padding:12px;margin:6px 0;border-radius:8px;border:none;font-size:16px;box-sizing:border-box}
+  button{background:#3b82f6;color:#fff;cursor:pointer}
+  button.red{background:#ef4444}
+  #result{margin-top:12px;padding:14px;border-radius:10px;font-size:20px;font-weight:bold;background:#334155}
+  #result.ok{background:#16a34a}
+  #result.bad{background:#dc2626}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+  td,th{border-bottom:1px solid #334155;padding:6px;text-align:left}
+  .small{font-size:13px;color:#94a3b8}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+
+<div class="box">
+  <h1>komhay gate security</h1>
+
+  <!-- gate page -->
+  <div id="gatepage" class="hidden">
+    <video id="gatevideo" autoplay muted playsinline></video>
+    <div id="result">loading...</div>
+    <p class="small">face the camera to time in / time out</p>
+  </div>
+
+  <!-- register page -->
+  <div id="registerpage" class="hidden">
+    <video id="regvideo" autoplay muted playsinline></video>
+    <input id="regname" placeholder="full name">
+    <select id="regrole">
+      <option>student</option>
+      <option>teacher</option>
+    </select>
+    <button id="regbtn">register my face</button>
+    <div id="regmsg" class="small">loading...</div>
+  </div>
+
+  <!-- admin page -->
+  <div id="adminpage" class="hidden">
+    <p class="small">registration link (send this to students and teachers)</p>
+    <input id="reglink" readonly>
+    <button id="copybtn">copy link</button>
+    <h3>registered</h3>
+    <table id="peopletable"></table>
+    <h3>time in / time out</h3>
+    <table id="logtable"></table>
+    <button id="clearlogs" class="red">clear all logs</button>
+  </div>
+</div>
+
+<script>
+var adminpin = '1234';
+var modelurl = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+var page = new URLSearchParams(location.search).get('page') || 'gate';
+
+/* ---------- storage (swap these 4 functions for a database later) ---------- */
+function getpeople(){ return JSON.parse(localStorage.getItem('people') || '[]'); }
+function savepeople(list){ localStorage.setItem('people', JSON.stringify(list)); }
+function getlogs(){ return JSON.parse(localStorage.getItem('logs') || '[]'); }
+function savelogs(list){ localStorage.setItem('logs', JSON.stringify(list)); }
+
+/* ---------- helpers ---------- */
+function el(id){ return document.getElementById(id); }
+function today(){ return new Date().toLocaleDateString(); }
+function nowtime(){ return new Date().toLocaleTimeString(); }
+
+async function loadmodels(){
+  await faceapi.nets.tinyFaceDetector.loadFromUri(modelurl);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(modelurl);
+  await faceapi.nets.faceRecognitionNet.loadFromUri(modelurl);
+}
+
+async function startcamera(video){
+  var stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+  video.srcObject = stream;
+  await new Promise(function(r){ video.onloadedmetadata = r; });
+}
+
+function detectface(video){
+  return faceapi
+    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks()
+    .withFaceDescriptor();
+}
+
+/* ---------- gate page ---------- */
+async function startgate(){
+  el('gatepage').classList.remove('hidden');
+  await loadmodels();
+  await startcamera(el('gatevideo'));
+  el('result').textContent = 'ready - please face the camera';
+
+  var lastname = '';
+  var lasttime = 0;
+
+  setInterval(async function(){
+    var found = await detectface(el('gatevideo'));
+    var result = el('result');
+    if(!found){ return; }
+
+    var people = getpeople();
+    var labeled = people.map(function(p){
+      return new faceapi.LabeledFaceDescriptors(
+        p.id,
+        p.descriptors.map(function(d){ return new Float32Array(d); })
+      );
+    });
+
+    if(labeled.length === 0){
+      result.className = 'bad';
+      result.textContent = 'Not A Student From KOMHAY';
+      return;
+    }
+
+    var matcher = new faceapi.FaceMatcher(labeled, 0.5);
+    var best = matcher.findBestMatch(found.descriptor);
+
+    if(best.label === 'unknown'){
+      result.className = 'bad';
+      result.textContent = 'Not A Student From KOMHAY';
+      lastname = '';
+      return;
+    }
+
+    var person = people.find(function(p){ return p.id === best.label; });
+
+    // avoid scanning the same person again and again
+    if(lastname === person.id && Date.now() - lasttime < 5000){ return; }
+    lastname = person.id;
+    lasttime = Date.now();
+
+    var logs = getlogs();
+    var record = logs.find(function(l){ return l.id === person.id && l.date === today(); });
+
+    if(!record){
+      logs.push({ id: person.id, name: person.name, role: person.role, date: today(), timein: nowtime(), timeout: '' });
+      result.className = 'ok';
+      result.innerHTML = person.name + ' (' + person.role + ')<br>time in: ' + nowtime();
+    } else if(!record.timeout){
+      // must wait at least 1 minute after time in
+      var inms = new Date(record.date + ' ' + record.timein).getTime();
+      if(Date.now() - inms < 60000){
+        result.className = 'ok';
+        result.innerHTML = person.name + '<br>already timed in at ' + record.timein;
+      } else {
+        record.timeout = nowtime();
+        result.className = 'ok';
+        result.innerHTML = person.name + ' (' + person.role + ')<br>time out: ' + record.timeout;
+      }
+    } else {
+      result.className = 'ok';
+      result.innerHTML = person.name + '<br>in: ' + record.timein + ' | out: ' + record.timeout;
+    }
+    savelogs(logs);
+  }, 700);
+}
+
+/* ---------- register page ---------- */
+async function startregister(){
+  el('registerpage').classList.remove('hidden');
+  await loadmodels();
+  await startcamera(el('regvideo'));
+  el('regmsg').textContent = 'type your name, look at the camera, then tap register';
+
+  el('regbtn').onclick = async function(){
+    var name = el('regname').value.trim();
+    if(!name){ el('regmsg').textContent = 'please type your name'; return; }
+
+    el('regbtn').disabled = true;
+    var samples = [];
+    el('regmsg').textContent = 'hold still... scanning your face';
+
+    var tries = 0;
+    while(samples.length < 3 && tries < 20){
+      tries++;
+      var found = await detectface(el('regvideo'));
+      if(found){ samples.push(Array.from(found.descriptor)); }
+      await new Promise(function(r){ setTimeout(r, 400); });
+    }
+
+    if(samples.length < 3){
+      el('regmsg').textContent = 'face not clear, please try again (good light, face the camera)';
+      el('regbtn').disabled = false;
+      return;
+    }
+
+    var people = getpeople();
+    people.push({
+      id: 'p' + Date.now(),
+      name: name,
+      role: el('regrole').value,
+      descriptors: samples
+    });
+    savepeople(people);
+
+    el('regmsg').textContent = 'done! ' + name + ' is now registered.';
+    el('regname').value = '';
+    el('regbtn').disabled = false;
+  };
+}
+
+/* ---------- admin page ---------- */
+function startadmin(){
+  var pin = prompt('enter admin pin');
+  if(pin !== adminpin){ document.body.innerHTML = '<p>wrong pin</p>'; return; }
+
+  el('adminpage').classList.remove('hidden');
+  el('reglink').value = location.origin + location.pathname + '?page=register';
+  el('copybtn').onclick = function(){
+    navigator.clipboard.writeText(el('reglink').value);
+    el('copybtn').textContent = 'copied!';
+    setTimeout(function(){ el('copybtn').textContent = 'copy link'; }, 1500);
+  };
+  el('clearlogs').onclick = function(){
+    if(confirm('clear all logs?')){ savelogs([]); showadmin(); }
+  };
+  showadmin();
+}
+
+function showadmin(){
+  var ptable = '<tr><th>name</th><th>role</th><th></th></tr>';
+  getpeople().forEach(function(p){
+    ptable += '<tr><td>' + p.name + '</td><td>' + p.role + '</td>' +
+      '<td><button class="red" onclick="removeperson(\'' + p.id + '\')">x</button></td></tr>';
+  });
+  el('peopletable').innerHTML = ptable;
+
+  var ltable = '<tr><th>name</th><th>date</th><th>in</th><th>out</th></tr>';
+  getlogs().slice().reverse().forEach(function(l){
+    ltable += '<tr><td>' + l.name + '</td><td>' + l.date + '</td><td>' + l.timein + '</td><td>' + (l.timeout || '-') + '</td></tr>';
+  });
+  el('logtable').innerHTML = ltable;
+}
+
+function removeperson(id){
+  if(!confirm('remove this person?')){ return; }
+  savepeople(getpeople().filter(function(p){ return p.id !== id; }));
+  showadmin();
+}
+
+/* ---------- start ---------- */
+if(page === 'register'){ startregister(); }
+else if(page === 'admin'){ startadmin(); }
+else { startgate(); }
+</script>
+</body>
+</html>
