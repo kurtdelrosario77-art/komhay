@@ -1,0 +1,463 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>commonwealth high school gate security</title>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<style>
+  body{font-family:Arial,sans-serif;background:#0f172a;color:#fff;margin:0;padding:16px;text-align:center}
+  .header{margin:4px 0 18px}
+  .logo{width:190px;max-width:70%;height:auto;background:#fff;border-radius:18px;padding:8px;display:block;margin:0 auto 12px}
+  .school{font-size:22px;font-weight:bold;letter-spacing:1px;margin:0}
+  .sub{font-size:13px;color:#94a3b8;margin:4px 0 0}
+  .box{max-width:480px;margin:0 auto;background:#1e293b;border-radius:12px;padding:16px}
+  video{width:100%;border-radius:10px;background:#000;transform:scaleX(-1);display:block}
+  .cam{position:relative}
+  .cam canvas{position:absolute;top:0;left:0;width:100%;height:100%;transform:scaleX(-1)}
+  input,select,button{width:100%;padding:12px;margin:6px 0;border-radius:8px;border:none;font-size:16px;box-sizing:border-box}
+  button{background:#3b82f6;color:#fff;cursor:pointer}
+  button.red{background:#ef4444}
+  #result{margin-top:12px;padding:14px;border-radius:10px;font-size:20px;font-weight:bold;background:#334155}
+  #result.ok{background:#16a34a}
+  #result.bad{background:#dc2626}
+  #regmsg{margin-top:10px;font-size:13px;color:#94a3b8}
+  #regmsg.recording{font-size:16px;color:#22c55e;font-weight:bold}
+  #regmsg.done{padding:14px;border-radius:10px;font-size:20px;font-weight:bold;background:#16a34a;color:#fff}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+  td,th{border-bottom:1px solid #334155;padding:6px;text-align:left;vertical-align:top}
+  .small{font-size:13px;color:#94a3b8}
+  .hidden{display:none}
+  .thumb{width:60px;border-radius:6px;margin-top:4px;cursor:pointer;display:block}
+  #photoview{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;z-index:9}
+  #photoview.hidden{display:none}
+  #photoview img{max-width:92%;max-height:80%;border-radius:10px}
+</style>
+</head>
+<body>
+
+<div class="box">
+  <div class="header">
+    <img class="logo" src="logo.png" alt="commonwealth high school logo" onerror="this.style.display='none'">
+    <p class="school">COMMONWEALTH HIGH SCHOOL</p>
+    <p class="sub">gate security system</p>
+  </div>
+
+  <!-- gate page -->
+  <div id="gatepage" class="hidden">
+    <video id="gatevideo" autoplay muted playsinline></video>
+    <div id="result">loading...</div>
+    <p class="small">face the camera to time in / time out</p>
+  </div>
+
+  <!-- register page -->
+  <div id="registerpage" class="hidden">
+    <div class="cam">
+      <video id="regvideo" autoplay muted playsinline></video>
+      <canvas id="regcanvas"></canvas>
+    </div>
+    <input id="regname" placeholder="full name">
+    <select id="regrole">
+      <option>student</option>
+      <option>teacher</option>
+    </select>
+    <button id="regbtn">register my face</button>
+    <div id="regmsg">loading...</div>
+  </div>
+
+  <!-- admin page -->
+  <div id="adminpage" class="hidden">
+    <p class="small">registration link (send this to students and teachers)</p>
+    <input id="reglink" readonly>
+    <button id="copybtn">copy link</button>
+    <h3>registered</h3>
+    <table id="peopletable"></table>
+    <h3>time in / time out</h3>
+    <p class="small">only the last 24 hours are kept. tap a photo to enlarge it.</p>
+    <table id="logtable"></table>
+    <button id="clearlogs" class="red">clear all logs</button>
+  </div>
+</div>
+
+<!-- photo viewer (only used on the admin page) -->
+<div id="photoview" class="hidden"><img id="photoimg" src=""></div>
+
+<script>
+var firebaseconfig = {
+  apiKey: "AIzaSyAsMXT8o2Q5pQw53d6WddZKl1N_UF0b0xY",
+  authDomain: "komhay-cb817.firebaseapp.com",
+  projectId: "komhay-cb817",
+  storageBucket: "komhay-cb817.firebasestorage.app",
+  messagingSenderId: "1131103529",
+  appId: "1:1131103529:web:fc6bb665553acb61cd6338"
+};
+
+var adminpin = '1234';
+var modelurl = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+var page = new URLSearchParams(location.search).get('page') || 'gate';
+var dayms = 24 * 60 * 60 * 1000;
+var waitms = 5 * 60 * 1000;
+
+firebase.initializeApp(firebaseconfig);
+var db = firebase.firestore();
+
+/* ---------- shared database functions ---------- */
+async function getpeople(){
+  var snap = await db.collection('people').get();
+  return snap.docs.map(function(d){
+    var x = d.data();
+    return { id: d.id, name: x.name, role: x.role, descriptors: JSON.parse(x.descriptors) };
+  });
+}
+
+async function addperson(p){
+  await db.collection('people').doc(p.id).set({
+    name: p.name,
+    role: p.role,
+    descriptors: JSON.stringify(p.descriptors),
+    created: Date.now()
+  });
+}
+
+async function removeperson(id){
+  if(!confirm('remove this person?')){ return; }
+  await db.collection('people').doc(id).delete();
+}
+
+function datekey(){
+  var d = new Date();
+  return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
+
+async function getlog(personid){
+  var doc = await db.collection('logs').doc(personid + '_' + datekey()).get();
+  return doc.exists ? doc.data() : null;
+}
+
+async function savelog(personid, record){
+  await db.collection('logs').doc(personid + '_' + datekey()).set(record);
+}
+
+// deletes logs (and their photos) older than 24 hours
+async function purgelogs(){
+  var snap = await db.collection('logs').where('stamp', '<', Date.now() - dayms).get();
+  if(snap.size === 0){ return; }
+  var batch = db.batch();
+  snap.docs.forEach(function(d){ batch.delete(d.ref); });
+  await batch.commit();
+}
+
+async function clearlogs(){
+  var snap = await db.collection('logs').get();
+  var batch = db.batch();
+  snap.docs.forEach(function(d){ batch.delete(d.ref); });
+  await batch.commit();
+}
+
+/* ---------- helpers ---------- */
+function el(id){ return document.getElementById(id); }
+function today(){ return new Date().toLocaleDateString(); }
+function nowtime(){ return new Date().toLocaleTimeString(); }
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+function esc(t){
+  return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function loadmodels(){
+  await faceapi.nets.tinyFaceDetector.loadFromUri(modelurl);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(modelurl);
+  await faceapi.nets.faceRecognitionNet.loadFromUri(modelurl);
+}
+
+async function startcamera(video){
+  var stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+  video.srcObject = stream;
+  await new Promise(function(r){ video.onloadedmetadata = r; });
+}
+
+function detectface(video){
+  return faceapi
+    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks()
+    .withFaceDescriptor();
+}
+
+// takes a small compressed photo from the camera (about 10 KB)
+function takephoto(video){
+  var w = 240;
+  var h = Math.round(w * video.videoHeight / video.videoWidth);
+  var c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d').drawImage(video, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.6);
+}
+
+// draws a green line around the face (or clears it when box is null)
+function drawbox(box){
+  var video = el('regvideo');
+  var canvas = el('regcanvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  var c = canvas.getContext('2d');
+  c.clearRect(0, 0, canvas.width, canvas.height);
+  if(box){
+    c.strokeStyle = '#22c55e';
+    c.lineWidth = 5;
+    c.strokeRect(box.x, box.y, box.width, box.height);
+  }
+}
+
+/* ---------- gate page ---------- */
+async function startgate(){
+  el('gatepage').classList.remove('hidden');
+  try{
+    await loadmodels();
+    await startcamera(el('gatevideo'));
+  } catch(e){
+    el('result').className = 'bad';
+    el('result').textContent = 'error: ' + e.message;
+    return;
+  }
+
+  var people = [];
+  var matcher = null;
+
+  async function refreshpeople(){
+    try{
+      people = await getpeople();
+      if(people.length > 0){
+        matcher = new faceapi.FaceMatcher(people.map(function(p){
+          return new faceapi.LabeledFaceDescriptors(
+            p.id,
+            p.descriptors.map(function(d){ return new Float32Array(d); })
+          );
+        }), 0.5);
+      } else {
+        matcher = null;
+      }
+    } catch(e){
+      el('result').className = 'bad';
+      el('result').textContent = 'database error: ' + e.message;
+    }
+  }
+
+  await refreshpeople();
+  setInterval(refreshpeople, 20000); // new registrations show up within 20 seconds
+  purgelogs();
+  setInterval(purgelogs, 600000);
+
+  el('result').className = '';
+  el('result').textContent = 'ready - please face the camera';
+
+  var lastid = '';
+  var lasttime = 0;
+  var busy = false;
+
+  setInterval(async function(){
+    if(busy){ return; }
+    busy = true;
+    try{
+      var found = await detectface(el('gatevideo'));
+      var result = el('result');
+      if(!found){ busy = false; return; }
+
+      if(!matcher){
+        result.className = 'bad';
+        result.textContent = 'Not A Student From KOMHAY';
+        busy = false;
+        return;
+      }
+
+      var best = matcher.findBestMatch(found.descriptor);
+
+      if(best.label === 'unknown'){
+        result.className = 'bad';
+        result.textContent = 'Not A Student From KOMHAY';
+        lastid = '';
+        busy = false;
+        return;
+      }
+
+      var person = people.find(function(p){ return p.id === best.label; });
+
+      // avoid scanning the same person again and again
+      if(lastid === person.id && Date.now() - lasttime < 5000){ busy = false; return; }
+      lastid = person.id;
+      lasttime = Date.now();
+
+      var record = await getlog(person.id);
+
+      if(!record){
+        record = {
+          pid: person.id, name: person.name, role: person.role,
+          date: today(), timein: nowtime(), timeout: '', stamp: Date.now(),
+          photoin: takephoto(el('gatevideo')), photoout: ''
+        };
+        await savelog(person.id, record);
+        result.className = 'ok';
+        result.innerHTML = esc(person.name) + ' (' + esc(person.role) + ')<br>time in: ' + record.timein;
+      } else if(!record.timeout){
+        var passed = Date.now() - record.stamp;
+        if(passed < waitms){
+          var minsleft = Math.ceil((waitms - passed) / 60000);
+          result.className = 'ok';
+          result.innerHTML = esc(person.name) + '<br>already timed in at ' + record.timein +
+            '<br><span style="font-size:14px">time out in ' + minsleft + ' min</span>';
+        } else {
+          record.timeout = nowtime();
+          record.photoout = takephoto(el('gatevideo'));
+          await savelog(person.id, record);
+          result.className = 'ok';
+          result.innerHTML = esc(person.name) + ' (' + esc(person.role) + ')<br>time out: ' + record.timeout;
+        }
+      } else {
+        result.className = 'ok';
+        result.innerHTML = esc(person.name) + '<br>in: ' + record.timein + ' | out: ' + record.timeout;
+      }
+    } catch(e){
+      el('result').className = 'bad';
+      el('result').textContent = 'error: ' + e.message;
+    }
+    busy = false;
+  }, 700);
+}
+
+/* ---------- register page ---------- */
+async function startregister(){
+  el('registerpage').classList.remove('hidden');
+  try{
+    await loadmodels();
+    await startcamera(el('regvideo'));
+  } catch(e){
+    el('regmsg').textContent = 'error: ' + e.message;
+    return;
+  }
+  el('regmsg').className = '';
+  el('regmsg').textContent = 'type your name, look at the camera, then tap register';
+
+  el('regbtn').onclick = async function(){
+    var name = el('regname').value.trim();
+    if(!name){ el('regmsg').className = ''; el('regmsg').textContent = 'please type your name'; return; }
+
+    el('regbtn').disabled = true;
+    el('regmsg').className = 'recording';
+    el('regmsg').textContent = 'recording your face... hold still';
+
+    var samples = [];
+    var start = Date.now();
+    var lastsample = 0;
+
+    while(samples.length < 3 && Date.now() - start < 15000){
+      var found = await detectface(el('regvideo'));
+      if(found){
+        drawbox(found.detection.box);
+        if(Date.now() - lastsample > 400){
+          samples.push(Array.from(found.descriptor));
+          lastsample = Date.now();
+        }
+      } else {
+        drawbox(null);
+      }
+      await sleep(100);
+    }
+
+    if(samples.length < 3){
+      drawbox(null);
+      el('regmsg').className = '';
+      el('regmsg').textContent = 'face not clear, please try again (good light, face the camera)';
+      el('regbtn').disabled = false;
+      return;
+    }
+
+    try{
+      await addperson({
+        id: 'p' + Date.now(),
+        name: name,
+        role: el('regrole').value,
+        descriptors: samples
+      });
+    } catch(e){
+      drawbox(null);
+      el('regmsg').className = '';
+      el('regmsg').textContent = 'could not save: ' + e.message;
+      el('regbtn').disabled = false;
+      return;
+    }
+
+    el('regmsg').className = 'done';
+    el('regmsg').textContent = 'Face Registered';
+    el('regname').value = '';
+    el('regbtn').disabled = false;
+
+    // keep the green line for a moment, then clear it
+    setTimeout(function(){ drawbox(null); }, 2500);
+  };
+}
+
+/* ---------- admin page ---------- */
+function photohtml(src){
+  if(!src || src.indexOf('data:image/jpeg;base64,') !== 0){ return ''; }
+  return '<img class="thumb" src="' + src + '" onclick="showphoto(this.src)">';
+}
+
+function showphoto(src){
+  el('photoimg').src = src;
+  el('photoview').classList.remove('hidden');
+}
+
+function startadmin(){
+  var pin = prompt('enter admin pin');
+  if(pin !== adminpin){ document.body.innerHTML = '<p>wrong pin</p>'; return; }
+
+  el('adminpage').classList.remove('hidden');
+  el('photoview').onclick = function(){ el('photoview').classList.add('hidden'); };
+  el('reglink').value = location.origin + location.pathname + '?page=register';
+  el('copybtn').onclick = function(){
+    navigator.clipboard.writeText(el('reglink').value);
+    el('copybtn').textContent = 'copied!';
+    setTimeout(function(){ el('copybtn').textContent = 'copy link'; }, 1500);
+  };
+  el('clearlogs').onclick = async function(){
+    if(confirm('clear all logs and photos?')){ await clearlogs(); }
+  };
+
+  purgelogs();
+
+  // live lists: updates by itself when someone registers or times in
+  db.collection('people').onSnapshot(function(snap){
+    var html = '<tr><th>name</th><th>role</th><th></th></tr>';
+    snap.docs.forEach(function(d){
+      var p = d.data();
+      html += '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.role) + '</td>' +
+        '<td><button class="red" onclick="removeperson(\'' + d.id + '\')">x</button></td></tr>';
+    });
+    el('peopletable').innerHTML = html;
+  }, function(e){
+    el('peopletable').innerHTML = '<tr><td>database error: ' + esc(e.message) + '</td></tr>';
+  });
+
+  db.collection('logs').orderBy('stamp', 'desc').onSnapshot(function(snap){
+    var html = '<tr><th>name</th><th>in</th><th>out</th></tr>';
+    snap.docs.forEach(function(d){
+      var l = d.data();
+      if(l.stamp < Date.now() - dayms){ return; }
+      html += '<tr><td>' + esc(l.name) + '<br><span class="small">' + esc(l.date) + '</span></td>' +
+        '<td>' + esc(l.timein) + photohtml(l.photoin) + '</td>' +
+        '<td>' + (l.timeout ? esc(l.timeout) + photohtml(l.photoout) : '-') + '</td></tr>';
+    });
+    el('logtable').innerHTML = html;
+  }, function(e){
+    el('logtable').innerHTML = '<tr><td>database error: ' + esc(e.message) + '</td></tr>';
+  });
+}
+
+/* ---------- start ---------- */
+if(page === 'register'){ startregister(); }
+else if(page === 'admin'){ startadmin(); }
+else { startgate(); }
+</script>
+</body>
+</html>
